@@ -16,13 +16,40 @@ db = mysql.connector.connect(
     database=config['database']
 )
 
+ns = "{http://www.talkbank.org/ns/talkbank}"
+
 insert_cursor = db.cursor()
+
+punctuation_mapping = {
+    'q' : '?',
+    'e' : '!',
+    'trail off':'.',
+    'p': '.'
+}
 
 def get_node_name(node):
     matchs = re.findall('[a-zA-Z]+(?![^{]*\})',node)
     if len(matchs) > 0:
         return matchs[0]
     return None
+
+def get_participant(id):
+    p_cursor = db.cursor(prepared=True)
+
+    p_cursor.execute("SELECT * FROM participant WHERE id = %s",(id,))
+
+    return p_cursor.fetchone()
+
+def insert(entity, data):
+    sql = "INSERT INTO "+entity+" ("+(', '.join(data.keys()))+") VALUES ("+(', '.join('%s' for a in range(len(data.keys()))))+");"
+    values = tuple(data.values())
+
+    # print(sql)
+    # print(values)
+    i_cursor = db.cursor(prepared=True)
+    i_cursor.execute(sql,values)
+
+    db.commit()
 
 
 for r,d,f in os.walk('./corpora'):
@@ -66,16 +93,94 @@ for r,d,f in os.walk('./corpora'):
                                     'order': int(child.attrib['uID'].split('u')[1]),
                                     'corpus_id': corpus['id']
                                 }
+                                
+                                speaker = get_participant(utterance['speaker_id'])
 
-                                speaker_information_cursor = db.cursor(prepared=True)
+                                target_child_id = None
+                                target_child_age = None
+                                target_child_name = None
+                                target_child_sex = None
 
-                                speaker_information_cursor.execute("SELECT * FROM participant WHERE id = %s",(utterance['speaker_id'],))
+                                if speaker[13] != None:
+                                    tc = get_participant(speaker[13])
+                                    target_child_id = speaker[13]
+                                    target_child_age = tc[12]
+                                    target_child_name = tc[2]
+                                    target_child_sex = tc[6]
+                                
 
-                                speaker = speaker_information_cursor.fetchone()
+                                sql = "insert into utterance_jap (speaker_id,`order`, corpus_id, speaker_age, speaker_code, speaker_name, speaker_role, speaker_sex, target_child_id, target_child_name, target_child_sex, target_child_age) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
+                                # print(sql)
+                                insert_cursor.execute(sql, (utterance['speaker_id'],utterance['order'],utterance['corpus_id'],speaker[12],speaker[1],   speaker[2],     speaker[3],  speaker[6],  speaker[13],     target_child_name, target_child_age, target_child_age ))
+                                # "insert into utterance_jap (speaker_id,             `order`,            corpus_id,            speaker_age, speaker_code, speaker_name, speaker_role, speaker_sex, target_child_id, target_child_name, target_child_sex, target_child_age) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
+                                db.commit()
 
-                                sql = "insert into utterance_jap (speaker_id,`order`, corpus_id, speaker_age, speaker_code, speaker_name, speaker_role, speaker_sex, target_child_id, target_child_name, target_child_sex) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
+                                utterance_id = insert_cursor.lastrowid
+                                i = 0
+                                for token in child:
+                                    if get_node_name(token.tag) in ['w','t','tagMarker']:
+                                        tk = {
+                                            'speaker_id':speaker[0],
+                                            'utterance_id': utterance_id,
+                                            'token_order':i,
+                                            'corpus_id':corpus['id']
+                                        }
+                                        if get_node_name(token.tag) == 'w':
+                                            # WORD
+                                            # print(token.text)
+                                            tk['gloss'] = token.text
+                                            replacement = token.find(ns+'replacement')
+                                            if replacement != None:
+                                                tk['replacement'] = replacement.text
+                                                token = replacement
 
-                                insert_cursor.execute(sql, (utterance['speaker_id'],utterance['order'],utterance['corpus_id'],speaker[12],speaker[1],speaker[2],speaker[3],speaker[6],speaker[13]))
+                                            if token.find(ns+'mor') != None:
+                                                if token.find(ns+'mor').find(ns+'mwc') != None:
+                                                    tk['part_of_speech'] = token.find(ns+'mor').find(ns+'mwc').find(ns+'pos').find(ns+'c').text
+                                                    stems = []
+                                                    for mw in token.find(ns+'mor').find(ns+'mwc').findall(ns+'mw'):
+                                                        stems.append(mw.find(ns+"stem").text)
+                                                    tk['stem'] = ''.join(stems)
+                                                else:
+                                                    tk['part_of_speech'] = token.find(ns+'mor').find(ns+'mw').find(ns+'pos').find(ns+'c').text
+                                                    tk['stem'] = token.find(ns+'mor').find(ns+'mw').find(ns+'stem').text
 
-                                "insert into utterance_jap (speaker_id,`order`, corpus_id, speaker_age, speaker_code, speaker_name, speaker_role, speaker_sex, target_child_id, target_child_name, target_child_sex) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
+                                                gra = token.find(ns+'mor').find(ns+'gra')
+                                                if gra != None:
+                                                    tk['relation'] = gra.attrib['index']+"|"+gra.attrib['head']+"|"+gra.attrib['relation']
+                                            
+                                            if token.find(ns+"shortening") != None:
+                                                tk['gloss']  = tk['stem']
+                                            
+                                            
+                                        elif get_node_name(token.tag) == 't':
+                                            #punctuation
+                                            _type = token.attrib['type']
+                                            if _type in punctuation_mapping:
+                                                tk['gloss'] = punctuation_mapping[_type]
+                                                tk['stem'] = punctuation_mapping[_type]
+                                                tk['part_of_speech'] = "f"
+                                                
+                                                if token.find(ns+'mor') != None:
+                                                    gra = token.find(ns+'mor').find(ns+'gra')
+                                                    if gra != None:
+                                                        tk['relation'] = gra.attrib['index']+"|"+gra.attrib['head']+"|"+gra.attrib['relation']
+
+                                        elif get_node_name(token.tag) == 'tagMarker':
+                                            tk['gloss'] = ','
+                                            tk['stem'] = ','
+                                            tk['part_of_speech'] = "f"
+                                            
+                                            if token.find(ns+'mor') != None:
+                                                gra = token.find(ns+'mor').find(ns+'gra')
+                                                if gra != None:
+                                                    tk['relation'] = gra.attrib['index']+"|"+gra.attrib['head']+"|"+gra.attrib['relation']
+                                            # comma, etc
+                                            pass
+                                        i = i +1
+                                        print(tk)
+                                        insert('token_jap',tk)
+                                        del tk
+                                print('\n')
+
                                 
