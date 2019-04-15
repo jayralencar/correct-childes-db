@@ -9,12 +9,16 @@ f = open('config.json','r')
 
 config = json.loads(f.read())
 
-db = mysql.connector.connect(
-    host=config['host'],
-    user=config['user'],
-    passwd=config['passwd'],
-    database=config['database']
-)
+
+def connect():
+    return mysql.connector.connect(
+        host=config['host'],
+        user=config['user'],
+        passwd=config['passwd'],
+        database=config['database']
+    )
+
+db = connect()
 
 ns = "{http://www.talkbank.org/ns/talkbank}"
 
@@ -24,8 +28,23 @@ punctuation_mapping = {
     'q' : '?',
     'e' : '!',
     'trail off':'.',
-    'p': '.'
+    'p': '.',
+    'quotation next line' : ':',
+    'interruption':'.',
+    'trail off question':'?',
+    'self interruption': '.',
+    'quotation precedes':':',
+    'self interruption question':'?',
+    'interruption question':'?'
 }
+
+a = db.cursor()
+
+a.execute("set global max_prepared_stmt_count = 100000;")
+
+db.commit()
+
+a.close()
 
 def get_node_name(node):
     matchs = re.findall('[a-zA-Z]+(?![^{]*\})',node)
@@ -38,7 +57,9 @@ def get_participant(id):
 
     p_cursor.execute("SELECT * FROM participant WHERE id = %s",(id,))
 
-    return p_cursor.fetchone()
+    res = p_cursor.fetchone()
+    # p_cursor.close()
+    return res
 
 def insert(entity, data):
     sql = "INSERT INTO "+entity+" ("+(', '.join(data.keys()))+") VALUES ("+(', '.join('%s' for a in range(len(data.keys()))))+");"
@@ -50,11 +71,14 @@ def insert(entity, data):
     i_cursor.execute(sql,values)
 
     db.commit()
-
-
+    # i_cursor.close()
+j = 0
 for r,d,f in os.walk('./corpora'):
-    if len(d) > 0:
-        for dirname in d:
+    path = r.split('/')
+    if len(path) > 2:
+        dirname = path[2]
+        print(dirname)
+        if dirname in ['Belfast']:
             corpus = {}
             corpus_cursor = db.cursor(prepared=True)
             corpus_cursor.execute("SELECT * FROM corpus where name = %s",(dirname,))
@@ -67,32 +91,61 @@ for r,d,f in os.walk('./corpora'):
                     'name' : corpora[0][1].decode("utf-8")
                 }
                 
-                for r,d,f in os.walk('./corpora/'+dirname):
-                    for filename in f[:1]:
-                        print(filename)
-                        tree = ET.parse('./corpora/'+dirname+"/"+filename)
+                for filename in f:
+                    print('\t'+r+"/"+filename)
+                    file_name = r+"/"+filename
+                    transcript_cursor = db.cursor(prepared=True)
+                    print(file_name, corpus['id'])
+                    transcript_cursor.execute("SELECT * FROM transcript_jap WHERE filename =%s AND corpus_id = %s",(file_name, corpus['id'],))
+                    res = transcript_cursor.fetchall()
+                    # transcript_cursor.close()
+                    print(res)
+
+                    if len(res) == 0:
+                    # if  "./corpora/Bates/Free20/amy.xml" == r+"/"+filename:
+                        tree = ET.parse(r+"/"+filename)
                         root = tree.getroot()
                         participants = {}
                         for child in root:
                             # Participants
+                            
                             if get_node_name(child.tag) =="Participants":
+                                # identify target_child
+                                participant_cursor = db.cursor(prepared=True)
                                 for participant in child:
-                                    participant_cursor = db.cursor(prepared=True)
-                                    if 'name' in participant.attrib:
+                                    if participant.attrib['id'] == 'CHI':
+                                        participant_cursor.execute("SELECT * FROM participant WHERE corpus_id = %s AND name = %s AND code = %s AND role = %s", (corpus['id'],participant.attrib['name'],participant.attrib['id'],participant.attrib['role'], ))
+                                        ps = participant_cursor.fetchall()
+                                        participants[participant.attrib['id']] = ps[0][0] 
+                                
+                                for participant in child:
+                                    # print(participant.attrib)
+                                    
+                                    if participant.attrib['id'] == 'CHI':
                                         participant_cursor.execute("SELECT * FROM participant WHERE corpus_id = %s AND name = %s AND code = %s AND role = %s", (corpus['id'],participant.attrib['name'],participant.attrib['id'],participant.attrib['role'], ))
                                         ps = participant_cursor.fetchall()
                                         participants[participant.attrib['id']] = ps[0][0]
+                                        # participant_cursor.close()
                                     elif 'CHI' in participants:
                                         participant_cursor.execute("SELECT * FROM participant WHERE corpus_id = %s AND target_child_id = %s AND code = %s AND role = %s", (corpus['id'],participants['CHI'],participant.attrib['id'],participant.attrib['role'], ))
                                         ps = participant_cursor.fetchall()
-                                        participants[participant.attrib['id']] = ps[0][0]
-                            
+                                        if len(ps) > 0:
+                                            participants[participant.attrib['id']] = ps[0][0]
+                                        else:
+                                            participant_cursor.execute("SELECT * FROM participant WHERE corpus_id = %s AND code = %s AND role = %s", (corpus['id'],participant.attrib['id'],participant.attrib['role'], ))
+                                            ps = participant_cursor.fetchall()
+                                            if len(ps) > 0:
+                                                participants[participant.attrib['id']] = ps[0][0]
+                                        # participant_cursor.close()
+                                print(participants) 
                             if get_node_name(child.tag) =="u":
                                 utterance = {
                                     "speaker_id": participants[child.attrib['who']],
                                     'order': int(child.attrib['uID'].split('u')[1]),
                                     'corpus_id': corpus['id']
                                 }
+                                print("FILE: "+file_name)
+                                print("Utterance: "+str(utterance['order']))
                                 
                                 speaker = get_participant(utterance['speaker_id'])
 
@@ -108,14 +161,29 @@ for r,d,f in os.walk('./corpora'):
                                     target_child_name = tc[2]
                                     target_child_sex = tc[6]
                                 
+                                utest_cursor = db.cursor(prepared=True)
+                                utest_cursor.execute("SELECT id, length FROM utterance_jap WHERE speaker_id = %s AND `order` = %s AND corpus_id = %s",(utterance['speaker_id'],utterance['order'],utterance['corpus_id'],))
+                                
+                                ut = utest_cursor.fetchall()
 
-                                sql = "insert into utterance_jap (speaker_id,`order`, corpus_id, speaker_age, speaker_code, speaker_name, speaker_role, speaker_sex, target_child_id, target_child_name, target_child_sex, target_child_age) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
-                                # print(sql)
-                                insert_cursor.execute(sql, (utterance['speaker_id'],utterance['order'],utterance['corpus_id'],speaker[12],speaker[1],   speaker[2],     speaker[3],  speaker[6],  speaker[13],     target_child_name, target_child_age, target_child_age ))
-                                # "insert into utterance_jap (speaker_id,             `order`,            corpus_id,            speaker_age, speaker_code, speaker_name, speaker_role, speaker_sex, target_child_id, target_child_name, target_child_sex, target_child_age) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
-                                db.commit()
+                                # utest_cursor.close()
 
-                                utterance_id = insert_cursor.lastrowid
+                                length = 0
+
+                                if len(ut)>0:
+                                    utterance_id = ut[0][0]
+                                    length = ut[0][1]
+                                else:
+                                    sql = "insert into utterance_jap (speaker_id,`order`, corpus_id, speaker_age, speaker_code, speaker_name, speaker_role, speaker_sex, target_child_id, target_child_name, target_child_sex, target_child_age) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
+                                    # print(sql)
+                                    insert_cursor.execute(sql, (utterance['speaker_id'],utterance['order'],utterance['corpus_id'],speaker[12],speaker[1],   speaker[2],     speaker[3],  speaker[6],  speaker[13],     target_child_name, target_child_age, target_child_age ))
+                                    # "insert into utterance_jap (speaker_id,             `order`,            corpus_id,            speaker_age, speaker_code, speaker_name, speaker_role, speaker_sex, target_child_id, target_child_name, target_child_sex, target_child_age) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
+                                    db.commit()
+
+                                    utterance_id = insert_cursor.lastrowid
+
+                                    # insert_cursor.close()
+
                                 i = 0
                                 for token in child:
                                     if get_node_name(token.tag) in ['w','t','tagMarker']:
@@ -125,62 +193,89 @@ for r,d,f in os.walk('./corpora'):
                                             'token_order':i,
                                             'corpus_id':corpus['id']
                                         }
-                                        if get_node_name(token.tag) == 'w':
-                                            # WORD
-                                            # print(token.text)
-                                            tk['gloss'] = token.text
-                                            replacement = token.find(ns+'replacement')
-                                            if replacement != None:
-                                                tk['replacement'] = replacement.text
-                                                token = replacement
+                                        tk_test_cursor = db.cursor(prepared=True)
+                                        tk_test_cursor.execute("SELECT * FROM token_jap WHERE utterance_id = %s AND token_order = %s",(tk['utterance_id'],tk['token_order'],))
+                                        res = tk_test_cursor.fetchall()
+                                        # tk_test_cursor.close()
+                                        if len(res) == 0:
+                                            if get_node_name(token.tag) == 'w':
+                                                # WORD
+                                                # print(token.text)
+                                                tk['gloss'] = token.text
+                                                replacement = token.find(ns+'replacement')
+                                                if replacement != None:
+                                                    tk['replacement'] = replacement.text
+                                                    token = replacement
 
-                                            if token.find(ns+'mor') != None:
-                                                if token.find(ns+'mor').find(ns+'mwc') != None:
-                                                    tk['part_of_speech'] = token.find(ns+'mor').find(ns+'mwc').find(ns+'pos').find(ns+'c').text
-                                                    stems = []
-                                                    for mw in token.find(ns+'mor').find(ns+'mwc').findall(ns+'mw'):
-                                                        stems.append(mw.find(ns+"stem").text)
-                                                    tk['stem'] = ''.join(stems)
-                                                else:
-                                                    tk['part_of_speech'] = token.find(ns+'mor').find(ns+'mw').find(ns+'pos').find(ns+'c').text
-                                                    tk['stem'] = token.find(ns+'mor').find(ns+'mw').find(ns+'stem').text
+                                                if token.find(ns+'mor') != None:
+                                                    if token.find(ns+'mor').find(ns+'mwc') != None:
+                                                        tk['part_of_speech'] = token.find(ns+'mor').find(ns+'mwc').find(ns+'pos').find(ns+'c').text
+                                                        stems = []
+                                                        for mw in token.find(ns+'mor').find(ns+'mwc').findall(ns+'mw'):
+                                                            stems.append(mw.find(ns+"stem").text)
+                                                        tk['stem'] = ''.join(stems)
+                                                    else:
+                                                        tk['part_of_speech'] = token.find(ns+'mor').find(ns+'mw').find(ns+'pos').find(ns+'c').text
+                                                        tk['stem'] = token.find(ns+'mor').find(ns+'mw').find(ns+'stem').text
 
-                                                gra = token.find(ns+'mor').find(ns+'gra')
-                                                if gra != None:
-                                                    tk['relation'] = gra.attrib['index']+"|"+gra.attrib['head']+"|"+gra.attrib['relation']
-                                            
-                                            if token.find(ns+"shortening") != None:
-                                                tk['gloss']  = tk['stem']
-                                            
-                                            
-                                        elif get_node_name(token.tag) == 't':
-                                            #punctuation
-                                            _type = token.attrib['type']
-                                            if _type in punctuation_mapping:
-                                                tk['gloss'] = punctuation_mapping[_type]
-                                                tk['stem'] = punctuation_mapping[_type]
+                                                    gra = token.find(ns+'mor').find(ns+'gra')
+                                                    if gra != None:
+                                                        tk['relation'] = gra.attrib['index']+"|"+gra.attrib['head']+"|"+gra.attrib['relation']
+                                                
+                                                if token.find(ns+"shortening") != None:
+                                                    tk['gloss']  = tk['stem']
+                                                
+                                                if tk['gloss'] == None:
+                                                    tk['gloss'] = tk['stem']
+                                                
+                                                
+                                            elif get_node_name(token.tag) == 't':
+                                                #punctuation
+                                                _type = token.attrib['type']
+                                                if _type in punctuation_mapping:
+                                                    tk['gloss'] = punctuation_mapping[_type]
+                                                    tk['stem'] = punctuation_mapping[_type]
+                                                    tk['part_of_speech'] = "f"
+                                                    
+                                                    if token.find(ns+'mor') != None:
+                                                        gra = token.find(ns+'mor').find(ns+'gra')
+                                                        if gra != None:
+                                                            tk['relation'] = gra.attrib['index']+"|"+gra.attrib['head']+"|"+gra.attrib['relation']
+
+                                            elif get_node_name(token.tag) in ['tagMarker','pause']:
+                                                tk['gloss'] = ','
+                                                tk['stem'] = ','
                                                 tk['part_of_speech'] = "f"
                                                 
                                                 if token.find(ns+'mor') != None:
                                                     gra = token.find(ns+'mor').find(ns+'gra')
                                                     if gra != None:
                                                         tk['relation'] = gra.attrib['index']+"|"+gra.attrib['head']+"|"+gra.attrib['relation']
-
-                                        elif get_node_name(token.tag) == 'tagMarker':
-                                            tk['gloss'] = ','
-                                            tk['stem'] = ','
-                                            tk['part_of_speech'] = "f"
+                                                # comma, etc
+                                                pass
+                                            else:
+                                                print(">>>>>>>>>>>> "+get_node_name(token.tag))
+                                            i = i +1
+                                            print("\t\t"+tk['gloss'])
                                             
-                                            if token.find(ns+'mor') != None:
-                                                gra = token.find(ns+'mor').find(ns+'gra')
-                                                if gra != None:
-                                                    tk['relation'] = gra.attrib['index']+"|"+gra.attrib['head']+"|"+gra.attrib['relation']
-                                            # comma, etc
-                                            pass
-                                        i = i +1
-                                        print(tk)
-                                        insert('token_jap',tk)
+                                            insert('token_jap',tk)
+                                            # j = j + 1
+                                            # if j == 100:
+                                            #     db.close()
+                                            #     db = connect()
+                                            #     j = 0
                                         del tk
-                                print('\n')
+                                update_cursor = db.cursor()
+                                if i != 0:
+                                    print(length, i)
+                                    length = length + (i + 1)
+                                    update_cursor.execute("UPDATE utterance_jap SET length = %s WHERE id = %s",(length, utterance_id,))
+                                    db.commit()
+                                    # update_cursor.close()
+                                # print('\n')
+                        insert('transcript_jap',{
+                            'filename':file_name,
+                            'corpus_id': corpus['id']
+                        })
 
                                 
