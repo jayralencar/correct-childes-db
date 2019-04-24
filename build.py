@@ -71,16 +71,26 @@ def insert(entity, data):
     i_cursor.execute(sql,values)
 
     db.commit()
+
+    return i_cursor.lastrowid
     # i_cursor.close()
+
+def get_word_node(node):
+    if get_node_name(node.tag) == 'w':
+        return node
+    
+
+
 j = 0
-for r,d,f in os.walk('./corpora'):
+for r,d,f in os.walk('./corpora'): #Percorre corpora
     path = r.split('/')
     if len(path) > 2:
         dirname = path[2]
         print(dirname)
-        if dirname in ['Belfast']:
+        if dirname in ['Wells']: # Escolhe um corpus
             corpus = {}
             corpus_cursor = db.cursor(prepared=True)
+
             corpus_cursor.execute("SELECT * FROM corpus where name = %s",(dirname,))
 
             corpora = corpus_cursor.fetchall()
@@ -91,17 +101,35 @@ for r,d,f in os.walk('./corpora'):
                     'name' : corpora[0][1].decode("utf-8")
                 }
                 
-                for filename in f:
+                for filename in f: # percorre transcritos
                     print('\t'+r+"/"+filename)
                     file_name = r+"/"+filename
                     transcript_cursor = db.cursor(prepared=True)
                     print(file_name, corpus['id'])
-                    transcript_cursor.execute("SELECT * FROM transcript_jap WHERE filename =%s AND corpus_id = %s",(file_name, corpus['id'],))
+                    transcript_cursor.execute("SELECT id, filename, finished FROM transcript_jap WHERE filename =%s AND corpus_id = %s",(file_name, corpus['id'],))
                     res = transcript_cursor.fetchall()
                     # transcript_cursor.close()
-                    print(res)
+                    transcript = {}
 
-                    if len(res) == 0:
+                    if len(res) > 0:
+                        transcript = {
+                            "id" : res[0][0],
+                            "filename" : res[0][1],
+                            "finished":res[0][2]
+                        }
+
+                    else:
+                        transcript_id = insert('transcript_jap',{
+                            'filename':file_name,
+                            'corpus_id': corpus['id']
+                        })
+                        transcript = {
+                            "id" : transcript_id,
+                            "filename":file_name,
+                            'finished' : 0
+                        }
+
+                    if transcript['finished'] == 0: # se o transcrito não foi registrado no banco ainda.
                     # if  "./corpora/Bates/Free20/amy.xml" == r+"/"+filename:
                         tree = ET.parse(r+"/"+filename)
                         root = tree.getroot()
@@ -138,7 +166,8 @@ for r,d,f in os.walk('./corpora'):
                                                 participants[participant.attrib['id']] = ps[0][0]
                                         # participant_cursor.close()
                                 print(participants) 
-                            if get_node_name(child.tag) =="u":
+
+                            if get_node_name(child.tag) =="u": # utterances
                                 utterance = {
                                     "speaker_id": participants[child.attrib['who']],
                                     'order': int(child.attrib['uID'].split('u')[1]),
@@ -162,7 +191,7 @@ for r,d,f in os.walk('./corpora'):
                                     target_child_sex = tc[6]
                                 
                                 utest_cursor = db.cursor(prepared=True)
-                                utest_cursor.execute("SELECT id, length FROM utterance_jap WHERE speaker_id = %s AND `order` = %s AND corpus_id = %s",(utterance['speaker_id'],utterance['order'],utterance['corpus_id'],))
+                                utest_cursor.execute("SELECT id, length FROM utterance_jap WHERE speaker_id = %s AND `order` = %s AND corpus_id = %s AND transcript_id = %s",(utterance['speaker_id'],utterance['order'],utterance['corpus_id'],transcript['id'],))
                                 
                                 ut = utest_cursor.fetchall()
 
@@ -172,11 +201,14 @@ for r,d,f in os.walk('./corpora'):
 
                                 if len(ut)>0:
                                     utterance_id = ut[0][0]
-                                    length = ut[0][1]
+                                    if ut[0][1] == None:
+                                        length = 0
+                                    else: 
+                                        length = ut[0][1]
                                 else:
-                                    sql = "insert into utterance_jap (speaker_id,`order`, corpus_id, speaker_age, speaker_code, speaker_name, speaker_role, speaker_sex, target_child_id, target_child_name, target_child_sex, target_child_age) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
+                                    sql = "insert into utterance_jap (speaker_id,`order`, corpus_id, speaker_age, speaker_code, speaker_name, speaker_role, speaker_sex, target_child_id, target_child_name, target_child_sex, target_child_age, transcript_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
                                     # print(sql)
-                                    insert_cursor.execute(sql, (utterance['speaker_id'],utterance['order'],utterance['corpus_id'],speaker[12],speaker[1],   speaker[2],     speaker[3],  speaker[6],  speaker[13],     target_child_name, target_child_age, target_child_age ))
+                                    insert_cursor.execute(sql, (utterance['speaker_id'],utterance['order'],utterance['corpus_id'],speaker[12],speaker[1],   speaker[2],     speaker[3],  speaker[6],  speaker[13],     target_child_name, target_child_age, target_child_age, transcript['id'] ))
                                     # "insert into utterance_jap (speaker_id,             `order`,            corpus_id,            speaker_age, speaker_code, speaker_name, speaker_role, speaker_sex, target_child_id, target_child_name, target_child_sex, target_child_age) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
                                     db.commit()
 
@@ -186,7 +218,7 @@ for r,d,f in os.walk('./corpora'):
 
                                 i = 0
                                 for token in child:
-                                    if get_node_name(token.tag) in ['w','t','tagMarker']:
+                                    if get_node_name(token.tag) in ['w','t','tagMarker','g']:
                                         tk = {
                                             'speaker_id':speaker[0],
                                             'utterance_id': utterance_id,
@@ -197,10 +229,21 @@ for r,d,f in os.walk('./corpora'):
                                         tk_test_cursor.execute("SELECT * FROM token_jap WHERE utterance_id = %s AND token_order = %s",(tk['utterance_id'],tk['token_order'],))
                                         res = tk_test_cursor.fetchall()
                                         # tk_test_cursor.close()
-                                        if len(res) == 0:
-                                            if get_node_name(token.tag) == 'w':
+                                        if len(res) == 0: # Se o token não foi cadastrado ainda
+                                            if get_node_name(token.tag) in ['w','g']:
+                                                if get_node_name(token.tag) == 'g':
+                                                    # print(list(token.iter()))
+                                                    # for ssds in token:
+                                                    #     print(ssds)
+                                                    #     print('\n')
+                                                    a = token.find(ns+'w')
+                                                    if a == None:
+                                                        a = token.find(ns+"g").find(ns+'w')
+                                                    token = a
+                                                    
                                                 # WORD
                                                 # print(token.text)
+                                                # print(token)
                                                 tk['gloss'] = token.text
                                                 replacement = token.find(ns+'replacement')
                                                 if replacement != None:
@@ -223,7 +266,12 @@ for r,d,f in os.walk('./corpora'):
                                                         tk['relation'] = gra.attrib['index']+"|"+gra.attrib['head']+"|"+gra.attrib['relation']
                                                 
                                                 if token.find(ns+"shortening") != None:
-                                                    tk['gloss']  = tk['stem']
+                                                    if 'stem' not in tk:
+                                                        tk['gloss'] = token.text
+                                                        tk['stem'] = token.text
+                                                    else:
+                                                        tk['gloss']  = tk['stem']
+
                                                 
                                                 if tk['gloss'] == None:
                                                     tk['gloss'] = tk['stem']
@@ -273,9 +321,11 @@ for r,d,f in os.walk('./corpora'):
                                     db.commit()
                                     # update_cursor.close()
                                 # print('\n')
-                        insert('transcript_jap',{
-                            'filename':file_name,
-                            'corpus_id': corpus['id']
-                        })
+
+                    a = db.cursor()
+
+                    a.execute("UPDATE transcript_jap SET finished = 1 WHERE id = %s",(transcript['id'],))
+                        
+
 
                                 
